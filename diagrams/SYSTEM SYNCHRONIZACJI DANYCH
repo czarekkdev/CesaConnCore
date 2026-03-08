@@ -1,0 +1,27 @@
+---
+config:
+  layout: dagre
+---
+flowchart BT
+ subgraph Dev1["Urządzenie 1"]
+        Sync1["Sync Engine"]
+        Net1["Networker"]
+  end
+ subgraph Dev2["Urządzenie 2"]
+        Net2["Networker"]
+        Sync2["Sync Engine"]
+  end
+ subgraph Dev3["Urządzenie 3"]
+        Net3["Networker"]
+        Sync3["Sync Engine"]
+  end
+    Title["<b>SYSTEM SYNCHRONIZACJI DANYCH</b>"] --- User(["fa:fa-user Użytkownik"])
+    User -- Inicjuje zmianę --> Sync1
+    Sync1 -- Przekazuje dane --- Net1
+    Net1 == Transfer ==> Net2 & Net3
+    Net2 -- Przekazuje dane --- Sync2
+    Sync2 -. Powiadomienie .-> User
+    Net3 -- Przekazuje dane --- Sync3
+    Sync3 -. Powiadomienie .-> User
+
+    style Title fill:none,stroke:none,font-size:20px
