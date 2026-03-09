@@ -49,7 +49,7 @@ pub async fn udp_broadcast_presence(_message: &str, _duration: u64) {
 
 pub async fn udp_find_broadcaster(_duration: u64) -> Option<SocketAddr> {
 
-    if _duration > MAX_BROADCAST_DURATION { return None }
+    let _duration = if _duration > MAX_BROADCAST_DURATION { MAX_BROADCAST_DURATION } else { _duration };
 
     let socket = bind_socket("0.0.0.0:6363").await;
     let mut buf = [0; 1024];
@@ -63,6 +63,11 @@ pub async fn udp_find_broadcaster(_duration: u64) -> Option<SocketAddr> {
 
     match result {
         Ok(Ok((len, addr))) => {
+            if len == buf.len() {
+                eprintln!("Too big broadcast data!");
+                return None
+            }
+
             let name = String::from_utf8_lossy(&buf[..len]);
             
             if name.starts_with(&BROADCAST_NAME) {
