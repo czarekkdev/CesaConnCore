@@ -20,7 +20,13 @@ pub async fn bind_socket(addr: &str) -> TcpListener {
 }
 
 // TODO : Auth
-pub async fn connection_handler(connection: (TcpStream, SocketAddr)) {
+pub async fn recv_handler(connection: (TcpStream, SocketAddr)) {
+
+    //logic here
+}
+
+// TODO : Auth
+pub async fn connect_handler(connection: (TcpStream, SocketAddr)) {
 
     //logic here
 }
@@ -28,7 +34,7 @@ pub async fn connection_handler(connection: (TcpStream, SocketAddr)) {
 
 pub async fn recv(addr: &str) {
 
-    let listener = bind_socket(&addr).await;
+    let listener = bind_socket(addr).await;
 
     println!("Listening on: {addr}");
 
@@ -39,7 +45,7 @@ pub async fn recv(addr: &str) {
             Ok(connection) => {
                 println!("Successfully accepted connection.");
 
-                tokio::spawn(async move {connection_handler(connection).await});
+                tokio::spawn(async move {recv_handler(connection).await});
             },
             Err(_) => {
                 eprintln!("Failed to accept connection!");
@@ -51,16 +57,16 @@ pub async fn recv(addr: &str) {
 }
 
 pub async fn connect(addr: &str) {
-    let stream = match TcpStream::connect(addr).await {
+    match TcpStream::connect(addr).await {
         Ok(s) => {
-            s
+            let addr: SocketAddr = addr.parse().unwrap();
+            let connection = (s, addr);
+
+            tokio::spawn(async move {connect_handler(connection).await});
         },
 
         Err(_) => {
             eprintln!("Failed to connect!");
-            return
         }
     };
-
-    
 }
