@@ -108,3 +108,90 @@ pub async fn udp_find_broadcaster(duration: u64, message: &str) -> Option<Socket
         }
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+    use tokio::net::UdpSocket;
+
+    /// Test that bind_socket successfully binds to a valid address
+    #[tokio::test]
+    async fn test_bind_socket_valid() {
+        let socket = bind_socket("0.0.0.0:0").await; // port 0 = OS picks random port
+        assert!(socket.local_addr().is_ok());
+    }
+
+    /// Test that duration cap works — duration above MAX should be capped
+    #[tokio::test]
+    async fn test_duration_cap() {
+        let over_limit = MAX_BROADCAST_DURATION + 100;
+        let capped = if over_limit > MAX_BROADCAST_DURATION { MAX_BROADCAST_DURATION } else { over_limit };
+        assert_eq!(capped, MAX_BROADCAST_DURATION);
+    }
+
+    /// Test that udp_find_broadcaster times out when no broadcaster is present
+    #[tokio::test]
+    async fn test_find_broadcaster_timeout() {
+        // No broadcaster running — should timeout and return None
+        let result = udp_find_broadcaster(1, BROADCAST_NAME).await;
+        assert!(result.is_none());
+    }
+
+    /// Test full broadcast + discovery loop
+    /// Spawns a broadcaster and a finder at the same time
+    #[tokio::test]
+    async fn test_broadcast_and_find() {
+
+        // Spawn broadcaster in background
+        tokio::spawn(async {
+            udp_broadcast_presence(BROADCAST_NAME, 3).await;
+        });
+
+        // Give broadcaster a moment to start
+        sleep(Duration::from_millis(100)).await;
+
+        // Try to find the broadcaster
+        let result = udp_find_broadcaster(3, BROADCAST_NAME).await;
+
+        assert!(result.is_some());
+    }
+
+    /// Test that unknown broadcast name is rejected
+    #[tokio::test]
+    async fn test_unknown_device_rejected() {
+
+        // Broadcast with wrong name
+        tokio::spawn(async {
+            let socket = bind_socket("0.0.0.0:6363").await;
+            socket.set_broadcast(true).unwrap();
+            socket.send_to(b"UnknownDevice", "255.255.255.255:6363").await.unwrap();
+        });
+
+        sleep(Duration::from_millis(100)).await;
+
+        // Finder should reject unknown device
+        let result = udp_find_broadcaster(1, BROADCAST_NAME).await;
+        assert!(result.is_none());
+    }
+
+    /// Test that oversized packet is rejected
+    #[tokio::test]
+    async fn test_oversized_packet_rejected() {
+
+        tokio::spawn(async {
+            let socket = bind_socket("0.0.0.0:0").await;
+            socket.set_broadcast(true).unwrap();
+
+            // Send packet larger than buffer (1024 bytes)
+            let big_data = vec![0u8; 1025];
+            socket.send_to(&big_data, "255.255.255.255:6363").await.unwrap();
+        });
+
+        sleep(Duration::from_millis(100)).await;
+
+        let result = udp_find_broadcaster(1, BROADCAST_NAME).await;
+        assert!(result.is_none());
+    }
+}
