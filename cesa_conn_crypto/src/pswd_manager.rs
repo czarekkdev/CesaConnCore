@@ -5,7 +5,7 @@ pub enum PswdMErrors {
     HashFailed
 }
 
-pub fn derive_key(password: &[u8], salt: [u8; 32]) -> Result<[u8; 32], PswdmErrors> {
+pub fn derive_key(password: &[u8], salt: [u8; 32]) -> Result<[u8; 32], PswdMErrors> {
     let mut key = [0u8; 32];
 
     let cipher = Argon2::default();
