@@ -1,4 +1,5 @@
 use argon2::Argon2;
+
 use core::fmt;
 
 /// Errors that can occur during password-based key derivation
