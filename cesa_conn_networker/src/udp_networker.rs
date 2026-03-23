@@ -6,7 +6,9 @@ use core::net::SocketAddr;
 
 #[derive(Debug)]
 pub enum UdpNetworkerErrors {
-    FailedToBindSocket
+    FailedToBindSocket,
+    FailedToSetBroadcastMode,
+    FailedToSendBroadcast
 }
 
 /// Maximum allowed duration for broadcast/listening operations in seconds
@@ -17,37 +19,40 @@ pub static BROADCAST_NAME: &str = "CesaConn Brodcast";
 
 /// Broadcasts a UDP presence message every second for the given duration.
 /// Duration is capped at MAX_BROADCAST_DURATION to prevent indefinite broadcasting.
-pub async fn udp_broadcast_presence(message: &str, duration: u64) {
+pub async fn udp_broadcast_presence(message: &str, duration: u64) -> Result<(), UdpNetworkerErrors> {
 
     // Cap duration to the allowed maximum
     let duration = if duration > MAX_BROADCAST_DURATION { MAX_BROADCAST_DURATION } else { duration };
-    let socket = UdpSocket::bind("0.0.0.0:6363").await.unwrap();
+    let socket = UdpSocket::bind("0.0.0.0:6363").await
+    .map_err(|_| UdpNetworkerErrors::FailedToBindSocket)?;
 
     // Enable broadcast mode — required for sending to 255.255.255.255
-    match socket.set_broadcast(true) {
-        Ok(_) => println!("Succesfully enabled broadcast mode."),
-        Err(e) => eprintln!("Failed to enable broadcast mode! | Error: {}", e),
-    };
+    socket.set_broadcast(true)
+    .map_err(|_| UdpNetworkerErrors::FailedToSetBroadcastMode)?;
+
+    println!("Successfully enabled broadcast mode");
 
     for _tick in 0..duration {
 
         let msg = message.as_bytes();
 
         // Send broadcast packet to the local network
-        match socket.send_to(msg, "255.255.255.255:6363").await {
-            Ok(msg) => println!("Succesfully broadcasted: {} bytes | Data: {}", msg, message),
-            Err(e) => eprintln!("Failed to broadcast presence: {}", e),
-        }
+        let msg = socket.send_to(msg, "255.255.255.255:6363").await
+        .map_err(|_| UdpNetworkerErrors::FailedToSendBroadcast)?;
+
+        println!("Succesfully broadcasted: {} bytes | Data: {}", msg, message);
 
         // Wait one second before the next broadcast
         sleep(Duration::from_secs(1)).await;
     };
 
     // Disable broadcast mode after the loop finishes
-    match socket.set_broadcast(false) {
-        Ok(_) => println!("Succefully disabled broadcast mode."),
-        Err(e) => eprintln!("Failed disable broadcast mode! | Error: {}", e),
-    };
+    socket.set_broadcast(false)
+    .map_err(|_| UdpNetworkerErrors::FailedToSetBroadcastMode)?;
+
+    println!("Succefully disabled broadcast mode.");
+
+    Ok(())
 }
 
 /// Listens for incoming UDP packets for the given duration.
