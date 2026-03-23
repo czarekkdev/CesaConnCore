@@ -11,7 +11,7 @@ pub enum UdpNetworkerErrors {
     Timeout,
     FailedToFetchResult,
     DataTooBig,
-    UnknownDevice
+    UnknownDevice,
 }
 
 /// Maximum allowed duration for broadcast/listening operations in seconds
