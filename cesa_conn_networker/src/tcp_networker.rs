@@ -60,6 +60,11 @@ pub async fn recv(
             .await
             .map_err(|_| TcpNetworkerErrors::FailedToAcceptConnection)?;
 
+        if cloned_token.is_cancelled() {
+            println!("Quitting...");
+            break;
+        }
+
         tokio::spawn(async move {
             select! {
                 _ = cloned_token.cancelled() => {
