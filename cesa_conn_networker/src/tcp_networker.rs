@@ -1,8 +1,8 @@
 use core::net::SocketAddr;
 use std::sync::Arc;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
 use tokio::sync::Mutex;
-use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
@@ -23,7 +23,6 @@ pub async fn recv_handler(
     trusted_addrs: Arc<Mutex<Vec<SocketAddr>>>,
     cancellation_token: Arc<Mutex<CancellationToken>>,
 ) {
-
     
 }
 
@@ -44,7 +43,6 @@ pub async fn recv(
     trusted_addrs: Arc<Mutex<Vec<SocketAddr>>>,
     cancellation_token: Arc<Mutex<CancellationToken>>,
 ) -> Result<(), TcpNetworkerErrors> {
-
     println!("Listening on: {addr}");
 
     loop {
@@ -62,15 +60,15 @@ pub async fn recv(
             .await
             .map_err(|_| TcpNetworkerErrors::FailedToAcceptConnection)?;
 
-        let join_handle = tokio::spawn(async move {
+        tokio::spawn(async move {
             select! {
                 _ = cloned_token.cancelled() => {
                 // The token was cancelled
-                println!("Cancelled");
+                println!("Quitting...");
                 5
                 },
                 _ = recv_handler(listener_clone, incoming_connection, key_clone, trusted_addrs_clone, cancellation_token_clone) => {
-                    println!("Finished");
+                    println!("Passed connection to handler");
                     99
                 }
             }
@@ -80,6 +78,4 @@ pub async fn recv(
     Ok(())
 }
 
-pub async fn connect(addr: &str) {
-   
-}
+pub async fn connect(addr: &str) {}
