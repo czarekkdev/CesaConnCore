@@ -1,6 +1,6 @@
 use core::net::SocketAddr;
-use std::fmt;
 use std::sync::Arc;
+use std::fmt;
 use tokio::{io::AsyncReadExt, net::TcpStream, sync::Mutex};
 
 #[derive(Debug, PartialEq)]
@@ -28,12 +28,10 @@ pub async fn auth_incoming(
     trusted_addrs: Arc<Mutex<Vec<SocketAddr>>>,
     incoming_connection: (&mut TcpStream, SocketAddr),
 ) -> Result<bool, AuthErrors> {
-    let key_l = key.lock().await;
-    let trusted_addrs_l = trusted_addrs.lock().await;
     let buf = &mut [0u8; 32];
 
     // Reject connections from addresses not in the trusted list
-    if !trusted_addrs_l.contains(&incoming_connection.1) {
+    if !trusted_addrs.lock().await.contains(&incoming_connection.1) {
         println!(
             "Received connection from untrusted address: {}",
             incoming_connection.1
@@ -54,13 +52,18 @@ pub async fn auth_incoming(
         .map_err(|_| AuthErrors::FailedToReadFromStream)?;
 
     // Compare the received key against the expected one
-    if buf != key_l.as_ref() {
+    if buf != key.lock().await.as_ref() {
+
+        zeroize::Zeroize::zeroize(buf); // Clear sensitive data from memory immediately
+        
         println!(
             "Authentication failed for address: {}",
             incoming_connection.1
         );
         return Ok(false);
     }
+
+    
 
     println!(
         "Authentication successful for address: {}",

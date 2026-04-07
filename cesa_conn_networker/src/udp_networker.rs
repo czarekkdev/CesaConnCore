@@ -128,10 +128,22 @@ pub async fn udp_find_broadcaster(
     println!("Searching for devices on network...");
 
     // Wait for incoming packet — abort if duration expires
-    let (len, addr) = timeout(Duration::from_secs(duration), socket.recv_from(&mut buf))
+    let recv_result = timeout(Duration::from_secs(duration), socket.recv_from(&mut buf))
         .await
-        .map_err(|_| UdpNetworkerErrors::Timeout)? // timeout expired
-        .map_err(|_| UdpNetworkerErrors::FailedToFetchResult)?; // socket error
+        .map_err(|_| UdpNetworkerErrors::Timeout)?; // timeout expired;
+
+    let (len, addr) = match recv_result {
+        Ok(v) => v,
+        Err(e) => {
+            
+            #[cfg(windows)]
+            if e.raw_os_error() == Some(10040) {
+                return Err(UdpNetworkerErrors::DataTooBig)
+            }
+
+            return Err(UdpNetworkerErrors::FailedToFetchResult)
+        }
+    };
 
     // If len equals buffer size, packet may have been truncated — discard it
     // recv_from never returns more than buf.len(), so == means truncation occurred
