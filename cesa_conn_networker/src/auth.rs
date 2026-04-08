@@ -35,6 +35,23 @@ impl fmt::Display for AuthErrors {
     }
 }
 
+/// Decrypts a tunnel message produced by `encrypt_tunnel`.
+/// Expects the input to be: nonce (12 bytes) + AES-GCM ciphertext (N bytes).
+pub fn decrypt_tunnel(shared_key: &[u8; 32], ciphertext: &[u8]) -> Result<Vec<u8>, AuthErrors> {
+    let nonce = &mut [0u8; 12];
+    nonce.copy_from_slice(&ciphertext[..12]);
+
+    decrypt(shared_key, &ciphertext[12..], nonce).map_err(|_| AuthErrors::FailedToDecrypt)
+}
+
+/// Encrypts plaintext and returns: nonce (12 bytes) + AES-GCM ciphertext (N+16 bytes).
+/// The nonce is randomly generated — output is different every call even for the same input.
+pub fn encrypt_tunnel(shared_key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, AuthErrors> {
+    let (encrypted_data, nonce) =
+        encrypt(shared_key, plaintext).map_err(|_| AuthErrors::FailedToEncrypt)?;
+    Ok([nonce.to_vec(), encrypted_data].concat())
+}
+
 /// Authenticates an incoming TCP connection using ECDH key exchange + pre-shared key verification.
 ///
 /// Handshake sequence:
@@ -48,20 +65,20 @@ impl fmt::Display for AuthErrors {
 ///
 /// Both sides prove they know the pre-shared key, so neither can impersonate the other.
 ///
-/// Returns (authenticated, server_public_key, shared_key_hash).
+/// Returns (authenticated, shared_key_hash).
 /// The caller should use shared_key_hash as the session encryption key for all further communication.
 pub async fn auth_incoming(
     key: Arc<RwLock<[u8; 32]>>,
     trusted_addrs: Arc<RwLock<Vec<SocketAddr>>>,
     incoming_connection: (&mut TcpStream, SocketAddr),
-) -> Result<(bool, [u8; 32], [u8; 32]), AuthErrors> {
+) -> Result<(bool, [u8; 32]), AuthErrors> {
     // Step 1: IP allowlist check — reject unknown peers before doing any crypto work
     if !trusted_addrs.read().await.contains(&incoming_connection.1) {
         println!(
             "Received connection from untrusted address: {}",
             incoming_connection.1
         );
-        return Ok((false, [0u8; 32], [0u8; 32]));
+        return Ok((false, [0u8; 32]));
     }
 
     println!(
@@ -84,13 +101,13 @@ pub async fn auth_incoming(
             "Received invalid public key from address: {}",
             incoming_connection.1
         );
-        return Ok((false, [0u8; 32], [0u8; 32]));
+        return Ok((false, [0u8; 32]));
     }
 
     // Step 3: Generate our ephemeral keypair and derive the shared secret
     // private_key is marked &mut so we can zeroize it from memory after use
     let private_key = &mut generate_private_key();
-    let public_key = calculate_public_key(&private_key);
+    let public_key = &mut calculate_public_key(&private_key);
     let shared_key = &mut calculate_shared_key(&private_key, their_pub_key);
 
     // Hash the raw ECDH output before using it as an AES key — raw shared secrets
@@ -104,15 +121,16 @@ pub async fn auth_incoming(
     // Step 3b: Send our public key to the client so they can compute the same shared secret
     incoming_connection
         .0
-        .write_all(&public_key)
+        .write_all(public_key)
         .await
         .map_err(|_| AuthErrors::FailedToWriteToStream)?;
+
+    Zeroize::zeroize(public_key); // wipe our public key from memory — already sent, not needed anymore
 
     // Step 4: Read the client's encrypted pre-shared key
     // Layout: [ nonce (12 bytes) | AES-GCM ciphertext (48 bytes) ] = 60 bytes total
     // Ciphertext = encrypt(pre_shared_key[32 bytes]) → 32 + 16 (GCM tag) = 48 bytes
     let e_key_buf = &mut [0u8; 60];
-    let nonce = &mut [0u8; 12];
 
     incoming_connection
         .0
@@ -120,16 +138,13 @@ pub async fn auth_incoming(
         .await
         .map_err(|_| AuthErrors::FailedToReadFromStream)?;
 
-    nonce.copy_from_slice(&e_key_buf[0..12]);
-
-    // Step 5: Decrypt using the derived shared key — GCM will also verify integrity,
+    // Step 5: Decrypt using the hashed shared key — GCM also verifies integrity,
     // so any tampering or wrong key causes an error here
-    let key_buf = &mut decrypt(&shared_key_hash, &e_key_buf[12..60], nonce)
+    let key_buf = &mut decrypt_tunnel(&shared_key_hash, e_key_buf)
         .map_err(|_| AuthErrors::FailedToDecrypt)?;
 
     // Wipe the encrypted buffer and nonce — plaintext key is now in key_buf
     Zeroize::zeroize(e_key_buf);
-    Zeroize::zeroize(nonce);
 
     // Step 6: Compare decrypted key against the expected pre-shared key
     if key_buf != key.read().await.as_ref() {
@@ -137,21 +152,16 @@ pub async fn auth_incoming(
             "Authentication failed for address: {}",
             incoming_connection.1
         );
-        return Ok((false, [0u8; 32], [0u8; 32]));
+        return Ok((false, [0u8; 32]));
     }
 
     // Wipe the decrypted key now that comparison is done
     Zeroize::zeroize(key_buf);
 
-    // Step 7: Encrypt our pre-shared key and send it back so the client can verify
-    // we know the same key — mutual authentication
-    let e_key = &mut encrypt(&shared_key_hash, key.read().await.as_ref())
+    // Step 7: Encrypt our pre-shared key and send it back — mutual authentication,
+    // client will verify we know the same key
+    let send_buf = &mut encrypt_tunnel(&shared_key_hash, key.read().await.as_ref())
         .map_err(|_| AuthErrors::FailedToEncrypt)?;
-
-    // Pack nonce + ciphertext into a single 60-byte buffer before sending
-    let send_buf = &mut [0u8; 60];
-    send_buf[0..12].copy_from_slice(&e_key.1);  // nonce
-    send_buf[12..60].copy_from_slice(&e_key.0); // ciphertext
 
     incoming_connection
         .0
@@ -161,10 +171,8 @@ pub async fn auth_incoming(
 
     // Wipe sensitive data — key material no longer needed
     Zeroize::zeroize(send_buf);
-    Zeroize::zeroize(&mut e_key.0);
-    Zeroize::zeroize(&mut e_key.1);
 
-    // Step 8: Read 1-byte confirmation from client — non-zero means they decrypted
+    // Step 8: Read 1-byte confirmation from client — 0x01 means they decrypted
     // our response successfully and confirmed they know the pre-shared key
     let buf = &mut [0u8];
 
@@ -179,7 +187,7 @@ pub async fn auth_incoming(
             "Client rejected our key confirmation, authentication failed for address: {}",
             incoming_connection.1
         );
-        return Ok((false, [0u8; 32], [0u8; 32]));
+        return Ok((false, [0u8; 32]));
     }
 
     println!(
@@ -187,21 +195,20 @@ pub async fn auth_incoming(
         incoming_connection.1
     );
 
-    // Return the server's public key so the caller can send it to the client,
-    // and the shared_key_hash for use as the session encryption key
-    Ok((true, public_key, shared_key_hash))
+    // Return authentication result and the shared_key_hash for use as the session encryption key
+    Ok((true, shared_key_hash))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cesa_conn_crypto::aes::{decrypt, encrypt};
+    use cesa_conn_crypto::aes::encrypt;
     use cesa_conn_crypto::ecdh::{
         calculate_public_key, calculate_shared_key, generate_private_key, hash_key,
     };
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     const TEST_KEY: [u8; 32] = [0xAB; 32];
 
@@ -228,7 +235,7 @@ mod tests {
         let (key, trusted) = make_shared_state(TEST_KEY, vec![]);
 
         let result = auth_incoming(key, trusted, (&mut server, peer_addr)).await;
-        assert_eq!(result.unwrap(), (false, [0u8; 32], [0u8; 32]));
+        assert_eq!(result.unwrap(), (false, [0u8; 32]));
     }
 
     /// An all-zero public key is invalid and must be rejected after reading.
@@ -240,7 +247,7 @@ mod tests {
         client.write_all(&[0u8; 32]).await.unwrap();
 
         let result = auth_incoming(key, trusted, (&mut server, peer_addr)).await;
-        assert_eq!(result.unwrap(), (false, [0u8; 32], [0u8; 32]));
+        assert_eq!(result.unwrap(), (false, [0u8; 32]));
     }
 
     /// Stream closing before sending a full public key must return FailedToReadFromStream.
@@ -286,18 +293,27 @@ mod tests {
     }
 
     /// Sending garbage bytes as the encrypted payload must fail decryption (GCM tag mismatch).
+    /// Client reads server pubkey first so the server's write doesn't race with the decrypt error.
     #[tokio::test]
     async fn test_invalid_ciphertext_returns_decrypt_error() {
         let (mut server, mut client, peer_addr) = setup_tcp_pair().await;
         let (key, trusted) = make_shared_state(TEST_KEY, vec![peer_addr]);
 
-        let client_priv = generate_private_key();
-        let client_pub = calculate_public_key(&client_priv);
+        let client_task = tokio::spawn(async move {
+            let client_priv = generate_private_key();
+            let client_pub = calculate_public_key(&client_priv);
 
-        client.write_all(&client_pub).await.unwrap();
-        client.write_all(&[0xDE; 60]).await.unwrap(); // random garbage
+            client.write_all(&client_pub).await.unwrap();
+
+            // Read server pubkey so its write_all doesn't error before we send garbage
+            client.read_exact(&mut [0u8; 32]).await.unwrap();
+
+            client.write_all(&[0xDE; 60]).await.unwrap(); // garbage — GCM tag will fail
+        });
 
         let result = auth_incoming(key, trusted, (&mut server, peer_addr)).await;
+        client_task.await.unwrap();
+
         assert_eq!(result.unwrap_err(), AuthErrors::FailedToDecrypt);
     }
 
@@ -307,46 +323,77 @@ mod tests {
         let client_priv = generate_private_key();
         let client_pub = calculate_public_key(&client_priv);
 
-        // Step 1: send our public key
+        // Step 1: send our ephemeral public key
         stream.write_all(&client_pub).await.unwrap();
 
-        // Step 2: read server's public key
+        // Step 2: read server's ephemeral public key
         let server_pub = &mut [0u8; 32];
         stream.read_exact(server_pub).await.unwrap();
 
         // Step 3: derive shared secret and encrypt our copy of the auth key
         let shared = calculate_shared_key(&client_priv, server_pub);
         let shared_hash = hash_key(&shared);
-        let (ciphertext, nonce) = encrypt(&shared_hash, &auth_key).unwrap();
+        let payload = encrypt_tunnel(&shared_hash, &auth_key).unwrap();
+        stream.write_all(&payload).await.unwrap();
 
-        // Send nonce (12 bytes) followed by ciphertext (48 bytes)
-        stream.write_all(&nonce).await.unwrap();
-        stream.write_all(&ciphertext).await.unwrap();
-
-        // Step 4: read server's encrypted key back (60 bytes: nonce + ciphertext)
-        // If server rejected us (wrong key), it closes the connection here — read_exact will error
+        // Step 4: read server's encrypted key back — EOF here means server rejected us
         let recv_buf = &mut [0u8; 60];
         if stream.read_exact(recv_buf).await.is_err() {
             return false;
         }
 
-        let recv_nonce: [u8; 12] = recv_buf[0..12].try_into().unwrap();
-        let recv_plaintext = match decrypt(&shared_hash, &recv_buf[12..60], &recv_nonce) {
+        let recv_plaintext = match decrypt_tunnel(&shared_hash, recv_buf) {
             Ok(p) => p,
             Err(_) => return false, // server sent something we can't decrypt
         };
 
         // Step 5: send 1-byte confirmation — 0x01 = verified, 0x00 = rejected
         let confirmed = recv_plaintext == auth_key;
-        let confirm_byte: u8 = if confirmed { 0x01 } else { 0x00 };
-        stream.write_all(&[confirm_byte]).await.unwrap();
+        stream
+            .write_all(&[if confirmed { 0x01 } else { 0x00 }])
+            .await
+            .unwrap();
 
         confirmed
     }
 
+    /// encrypt_tunnel output must be decryptable by decrypt_tunnel and produce the original data.
+    #[test]
+    fn test_tunnel_roundtrip() {
+        let key = [0x42u8; 32];
+        let plaintext = b"hello tunnel";
+
+        let encrypted = encrypt_tunnel(&key, plaintext).unwrap();
+        let decrypted = decrypt_tunnel(&key, &encrypted).unwrap();
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    /// decrypt_tunnel with a wrong key must fail (GCM tag mismatch).
+    #[test]
+    fn test_tunnel_wrong_key_fails() {
+        let key = [0x42u8; 32];
+        let wrong_key = [0xFFu8; 32];
+
+        let encrypted = encrypt_tunnel(&key, b"secret").unwrap();
+        assert!(decrypt_tunnel(&wrong_key, &encrypted).is_err());
+    }
+
+    /// encrypt_tunnel must produce different ciphertext each call (random nonce).
+    #[test]
+    fn test_tunnel_nonce_is_random() {
+        let key = [0x42u8; 32];
+        let plaintext = b"same data";
+
+        let e1 = encrypt_tunnel(&key, plaintext).unwrap();
+        let e2 = encrypt_tunnel(&key, plaintext).unwrap();
+
+        assert_ne!(e1, e2);
+    }
+
     /// Correct pre-shared key and trusted address must result in successful authentication
     /// on both sides — server returns true, client confirms the server's response.
-    /// Also verifies the returned public key and shared key hash are valid (non-zero).
+    /// Also verifies the returned shared key hash is valid (non-zero).
     #[tokio::test]
     async fn test_correct_key_auth_success() {
         let (mut server, client, peer_addr) = setup_tcp_pair().await;
@@ -357,11 +404,10 @@ mod tests {
         let result = auth_incoming(key, trusted, (&mut server, peer_addr)).await;
         let client_confirmed = client_task.await.unwrap();
 
-        let (authenticated, pub_key, shared_key_hash) = result.unwrap();
+        let (authenticated, shared_key_hash) = result.unwrap();
         assert!(authenticated);
         assert!(client_confirmed);
-        // Both returned values must be non-zero — zeros would mean the ECDH failed silently
-        assert_ne!(pub_key, [0u8; 32]);
+        // Shared key hash must be non-zero — zeroed key means ECDH failed silently
         assert_ne!(shared_key_hash, [0u8; 32]);
     }
 
@@ -374,7 +420,10 @@ mod tests {
         let (key, trusted) = make_shared_state(TEST_KEY, vec![peer_addr]);
 
         let wrong_key = [0xFFu8; 32];
-        let client_task = tokio::spawn(timeout(Duration::from_secs(5), run_client(client, wrong_key)));
+        let client_task = tokio::spawn(timeout(
+            Duration::from_secs(5),
+            run_client(client, wrong_key),
+        ));
         let result = auth_incoming(key, trusted, (&mut server, peer_addr)).await;
 
         // Drop server stream explicitly so the client's read_exact gets an EOF
@@ -382,7 +431,7 @@ mod tests {
 
         let client_confirmed = client_task.await.unwrap().unwrap();
 
-        assert_eq!(result.unwrap(), (false, [0u8; 32], [0u8; 32]));
+        assert_eq!(result.unwrap(), (false, [0u8; 32]));
         assert!(!client_confirmed);
     }
 
@@ -418,7 +467,7 @@ mod tests {
         let result = auth_incoming(key, trusted, (&mut server, peer_addr)).await;
         client_task.await.unwrap();
 
-        assert_eq!(result.unwrap(), (false, [0u8; 32], [0u8; 32]));
+        assert_eq!(result.unwrap(), (false, [0u8; 32]));
     }
 
     /// Client completes the full handshake correctly but closes the connection instead of
@@ -474,8 +523,8 @@ mod tests {
         t1.await.unwrap();
         t2.await.unwrap();
 
-        let (_, _, hash1) = r1.unwrap();
-        let (_, _, hash2) = r2.unwrap();
+        let (_, hash1) = r1.unwrap();
+        let (_, hash2) = r2.unwrap();
 
         assert_ne!(hash1, hash2);
     }
