@@ -32,8 +32,6 @@ impl fmt::Display for AuthErrors {
     }
 }
 
-// TODO: use constant-time comparison (e.g. subtle::ConstantTimeEq) to prevent timing attacks
-
 /// Authenticates an incoming TCP connection using ECDH key exchange + pre-shared key verification.
 ///
 /// Handshake sequence:
