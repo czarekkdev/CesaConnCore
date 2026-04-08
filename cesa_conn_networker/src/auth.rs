@@ -256,20 +256,32 @@ mod tests {
         assert_eq!(result.unwrap_err(), AuthErrors::FailedToReadFromStream);
     }
 
-    /// Stream closing after pubkey but before full encrypted payload must return FailedToReadFromStream.
+    /// Stream closing after pubkey exchange but before sending the full 60-byte encrypted payload
+    /// must return FailedToReadFromStream.
+    /// Client reads server pubkey first to avoid a race where the server's write fails instead.
     #[tokio::test]
     async fn test_incomplete_encrypted_payload_returns_error() {
         let (mut server, mut client, peer_addr) = setup_tcp_pair().await;
         let (key, trusted) = make_shared_state(TEST_KEY, vec![peer_addr]);
 
-        let client_priv = generate_private_key();
-        let client_pub = calculate_public_key(&client_priv);
+        let client_task = tokio::spawn(async move {
+            let client_priv = generate_private_key();
+            let client_pub = calculate_public_key(&client_priv);
 
-        client.write_all(&client_pub).await.unwrap();
-        client.write_all(&[0xAB; 20]).await.unwrap(); // only 20 of 60 bytes
-        drop(client);
+            // Send our pubkey so server can proceed to send its own
+            client.write_all(&client_pub).await.unwrap();
+
+            // Read server's pubkey so the server's write_all doesn't fail
+            client.read_exact(&mut [0u8; 32]).await.unwrap();
+
+            // Send only 20 of the required 60 bytes then close
+            client.write_all(&[0xAB; 20]).await.unwrap();
+            drop(client);
+        });
 
         let result = auth_incoming(key, trusted, (&mut server, peer_addr)).await;
+        client_task.await.unwrap();
+
         assert_eq!(result.unwrap_err(), AuthErrors::FailedToReadFromStream);
     }
 
@@ -334,6 +346,7 @@ mod tests {
 
     /// Correct pre-shared key and trusted address must result in successful authentication
     /// on both sides — server returns true, client confirms the server's response.
+    /// Also verifies the returned public key and shared key hash are valid (non-zero).
     #[tokio::test]
     async fn test_correct_key_auth_success() {
         let (mut server, client, peer_addr) = setup_tcp_pair().await;
@@ -344,10 +357,11 @@ mod tests {
         let result = auth_incoming(key, trusted, (&mut server, peer_addr)).await;
         let client_confirmed = client_task.await.unwrap();
 
-        let (authenticated, _pub_key, shared_key_hash) = result.unwrap();
+        let (authenticated, pub_key, shared_key_hash) = result.unwrap();
         assert!(authenticated);
         assert!(client_confirmed);
-        // shared_key_hash must be non-zero — zeroed key means something went wrong
+        // Both returned values must be non-zero — zeros would mean the ECDH failed silently
+        assert_ne!(pub_key, [0u8; 32]);
         assert_ne!(shared_key_hash, [0u8; 32]);
     }
 
@@ -405,6 +419,41 @@ mod tests {
         client_task.await.unwrap();
 
         assert_eq!(result.unwrap(), (false, [0u8; 32], [0u8; 32]));
+    }
+
+    /// Client completes the full handshake correctly but closes the connection instead of
+    /// sending the confirmation byte — server must return FailedToReadFromStream.
+    #[tokio::test]
+    async fn test_confirmation_byte_missing() {
+        let (mut server, mut client, peer_addr) = setup_tcp_pair().await;
+        let (key, trusted) = make_shared_state(TEST_KEY, vec![peer_addr]);
+
+        let client_task = tokio::spawn(async move {
+            let client_priv = generate_private_key();
+            let client_pub = calculate_public_key(&client_priv);
+
+            client.write_all(&client_pub).await.unwrap();
+
+            let server_pub = &mut [0u8; 32];
+            client.read_exact(server_pub).await.unwrap();
+
+            let shared = calculate_shared_key(&client_priv, server_pub);
+            let shared_hash = hash_key(&shared);
+            let (ciphertext, nonce) = encrypt(&shared_hash, &TEST_KEY).unwrap();
+            client.write_all(&nonce).await.unwrap();
+            client.write_all(&ciphertext).await.unwrap();
+
+            // Read server's confirmation payload so its write_all doesn't fail
+            client.read_exact(&mut [0u8; 60]).await.unwrap();
+
+            // Close without sending the confirmation byte
+            drop(client);
+        });
+
+        let result = auth_incoming(key, trusted, (&mut server, peer_addr)).await;
+        client_task.await.unwrap();
+
+        assert_eq!(result.unwrap_err(), AuthErrors::FailedToReadFromStream);
     }
 
     /// Each successful auth must produce a different shared key because ephemeral keys are
