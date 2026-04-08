@@ -1,11 +1,11 @@
-use cesa_conn_crypto::aes::{decrypt};
+use cesa_conn_crypto::aes::decrypt;
 use cesa_conn_crypto::ecdh::{
     calculate_public_key, calculate_shared_key, generate_private_key, hash_key,
 };
-use tokio::io::AsyncWriteExt;
 use core::net::SocketAddr;
 use std::fmt;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::{io::AsyncReadExt, net::TcpStream, sync::RwLock};
 use zeroize::Zeroize;
 
@@ -152,7 +152,9 @@ pub async fn auth_incoming(
 mod tests {
     use super::*;
     use cesa_conn_crypto::aes::encrypt;
-    use cesa_conn_crypto::ecdh::{calculate_public_key, calculate_shared_key, generate_private_key, hash_key};
+    use cesa_conn_crypto::ecdh::{
+        calculate_public_key, calculate_shared_key, generate_private_key, hash_key,
+    };
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
@@ -183,7 +185,7 @@ mod tests {
         let shared_hash = hash_key(&shared);
         let (ciphertext, nonce) = encrypt(&shared_hash, auth_key).unwrap();
         let mut payload = Vec::with_capacity(60);
-        payload.extend_from_slice(&nonce);     // bytes  0..12
+        payload.extend_from_slice(&nonce); // bytes  0..12
         payload.extend_from_slice(&ciphertext); // bytes 12..60
         (client_pub, payload)
     }
