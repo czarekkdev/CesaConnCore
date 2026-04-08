@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 pub enum TcpNetworkerErrors {
     FailedToBindSocket,
     FailedToAcceptConnection,
+    FailedToReadFromStream,
 }
 
 pub static DEFAULT_ADDR: &str = "127.0.0.1:6969";
@@ -48,7 +49,6 @@ pub async fn recv(
     println!("Listening on: {addr}");
 
     loop {
-
         let cancellation_token_clone = Arc::clone(&cancellation_token);
 
         let cloned_token = cancellation_token.read().await.clone();
